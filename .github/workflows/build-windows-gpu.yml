@@ -1,0 +1,184 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      create_release:
+        description: 'Create new release'
+        required: true
+        type: boolean
+  push:
+    branches:
+      - master
+    paths:
+      - '.github/workflows/release.yml'
+      - '**/CMakeLists.txt'
+      - '**/*.cmake'
+      - '**/*.h'
+      - '**/*.hpp'
+      - '**/*.c'
+      - '**/*.cpp'
+      - '**/*.cu'
+      - '**/*.cuh'
+      - '**/*.swift'
+      - '**/*.m'
+      - '**/*.metal'
+      - '**/*.comp'
+      - '**/*.glsl'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref || github.run_id }}
+  cancel-in-progress: true
+
+env:
+  CMAKE_ARGS: "-DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_TOOLS=ON -DLLAMA_BUILD_SERVER=ON -DGGML_RPC=ON"
+
+jobs:
+  windows-cpu:
+    runs-on: windows-2025
+    strategy:
+      matrix:
+        arch: [x64, arm64]
+    steps:
+      - uses: actions/checkout@v6
+        with: { fetch-depth: 0 }
+      - name: ccache
+        uses: ggml-org/ccache-action@v1
+        with: { key: windows-cpu-${{ matrix.arch }}, variant: ccache }
+      - name: Install Ninja
+        run: choco install ninja
+      - name: Build
+        shell: cmd
+        run: |
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvarsall.bat" ${{ matrix.arch == 'x64' && 'x64' || 'amd64_arm64' }}
+          cmake -S . -B build -G "Ninja Multi-Config" ^
+            -DCMAKE_TOOLCHAIN_FILE=cmake/${{ matrix.arch }}-windows-llvm.cmake ^
+            -DLLAMA_BUILD_BORINGSSL=ON ^
+            -DGGML_NATIVE=OFF ^
+            -DGGML_BACKEND_DL=ON ^
+            -DGGML_CPU_ALL_VARIANTS=${{ matrix.arch == 'x64' && 'ON' || 'OFF' }} ^
+            -DGGML_OPENMP=ON ^
+            ${{ env.CMAKE_ARGS }}
+          cmake --build build --config Release
+      - name: Pack
+        run: |
+          Copy-Item "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Redist\MSVC\14.44.35112\debug_nonredist\${{ matrix.arch }}\Microsoft.VC143.OpenMP.LLVM\libomp140.${{ matrix.arch == 'x64' && 'x86_64' || 'aarch64' }}.dll" .\build\bin\Release\
+          7z a -snl llama-bin-win-cpu-${{ matrix.arch }}.zip .\build\bin\Release\*
+      - name: Upload
+        uses: actions/upload-artifact@v6
+        with:
+          name: packages
+          path: "*.zip"
+
+  windows:
+    runs-on: windows-2025
+    strategy:
+      matrix:
+        include:
+          - backend: vulkan
+            arch: x64
+            defines: -DGGML_VULKAN=ON
+            target: ggml-vulkan
+          - backend: opencl-adreno
+            arch: arm64
+            defines: -G "Ninja Multi-Config" -DCMAKE_TOOLCHAIN_FILE=cmake/arm64-windows-llvm.cmake -DCMAKE_PREFIX_PATH="$env:RUNNER_TEMP/opencl-arm64-release" -DGGML_OPENCL=ON -DGGML_OPENCL_USE_ADRENO_KERNELS=ON
+            target: ggml-opencl
+    steps:
+      - uses: actions/checkout@v6
+      - name: ccache
+        uses: ggml-org/ccache-action@v1
+        with: { key: windows-${{ matrix.backend }}-${{ matrix.arch }}, variant: ccache }
+      - name: Install Vulkan SDK
+        if: matrix.backend == 'vulkan'
+        run: |
+          curl.exe -o $env:RUNNER_TEMP\VulkanSDK.exe -L https://sdk.lunarg.com/sdk/download/1.4.313.2/windows/vulkansdk-windows-X64-1.4.313.2.exe
+          & $env:RUNNER_TEMP\VulkanSDK.exe /S
+      - name: Install Ninja
+        run: choco install ninja
+      - name: Build
+        run: |
+          cmake -S . -B build ${{ matrix.defines }} -DGGML_NATIVE=OFF -DGGML_CPU=OFF -DGGML_BACKEND_DL=ON -DLLAMA_BUILD_BORINGSSL=ON
+          cmake --build build --config Release --target ${{ matrix.target }}
+      - name: Pack
+        run: 7z a -snl llama-bin-win-${{ matrix.backend }}-${{ matrix.arch }}.zip .\build\bin\Release\${{ matrix.target }}.dll
+      - name: Upload
+        uses: actions/upload-artifact@v6
+        with:
+          name: packages
+          path: "*.zip"
+
+  windows-cuda:
+    runs-on: windows-2022
+    strategy:
+      matrix:
+        cuda: ['12.4', '13.1']
+    steps:
+      - uses: actions/checkout@v6
+      - name: ccache
+        uses: ggml-org/ccache-action@v1
+        with: { key: windows-cuda-${{ matrix.cuda }}, variant: ccache }
+      - name: Setup CUDA
+        uses: ./.github/actions/windows-setup-cuda
+        with: { cuda_version: ${{ matrix.cuda }} }
+      - name: Install Ninja
+        run: choco install ninja
+      - name: Build
+        shell: cmd
+        run: |
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvarsall.bat" x64
+          cmake -S . -B build -G "Ninja Multi-Config" ^
+            -DGGML_BACKEND_DL=ON ^
+            -DGGML_NATIVE=OFF ^
+            -DGGML_CPU=OFF ^
+            -DGGML_CUDA=ON ^
+            -DCMAKE_CUDA_ARCHITECTURES=75 ^
+            -DGGML_CUDA_FMA=ON ^
+            -DGGML_CUDA_F16=ON ^
+            -DLLAMA_BUILD_BORINGSSL=ON
+          cmake --build build --config Release --target ggml-cuda
+      - name: Pack ggml-cuda
+        run: 7z a -snl llama-bin-win-cuda-${{ matrix.cuda }}-x64.zip .\build\bin\Release\ggml-cuda.dll
+      - name: Pack cuda runtime
+        run: |
+          mkdir cudart
+          robocopy ${{ env.CUDA_PATH }}\bin cudart cudart64_*.dll cublas64_*.dll cublasLt64_*.dll
+          7z a -snl cudart-llama-bin-win-cuda-${{ matrix.cuda }}-x64.zip ./cudart/*
+      - name: Upload
+        uses: actions/upload-artifact@v6
+        with:
+          name: packages
+          path: "*.zip"
+
+  release:
+    needs: [windows, windows-cpu, windows-cuda]
+    if: github.event_name == 'push' || github.event.inputs.create_release == 'true'
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with: { fetch-depth: 0 }
+
+      - name: Get tag
+        id: tag
+        uses: ./.github/actions/get-tag-name
+
+      # 下载所有 zip 到 packages/
+      - name: Download all artifacts
+        uses: actions/download-artifact@v7
+        with:
+          name: packages
+          path: packages
+
+      # 直接全部上传到 release
+      - name: Create and upload release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.name }}
+          body: |
+            Release ${{ steps.tag.outputs.name }}
+
+            ${{ github.event.head_commit.message }}
+          files: packages/*.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
