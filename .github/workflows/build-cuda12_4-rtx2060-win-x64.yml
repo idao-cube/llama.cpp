@@ -1,4 +1,5 @@
 name: Build CUDA 12.4 RTX 2060 Win x64
+
 on:
   workflow_dispatch:
     inputs:
@@ -19,27 +20,37 @@ on:
       - '**/*.cpp'
       - '**/*.cu'
       - '**/*.cuh'
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref || github.run_id }}
   cancel-in-progress: true
+
 env:
   BRANCH_NAME: ${{ github.head_ref || github.ref_name }}
   CMAKE_ARGS: "-DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_TOOLS=ON -DLLAMA_BUILD_SERVER=ON -DGGML_RPC=ON"
+
+permissions:
+  contents: read
+
 jobs:
   windows-cpu-x64:
     runs-on: windows-2025
+
     steps:
       - name: Clone
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
+
       - name: ccache
         uses: ggml-org/ccache-action@v1
         with:
           key: rtx2060-cpu-x64
           variant: ccache
+
       - name: Install Ninja
         run: choco install ninja
+
       - name: Build CPU backend
         shell: cmd
         run: |
@@ -53,31 +64,39 @@ jobs:
             -DGGML_OPENMP=ON ^
             %CMAKE_ARGS%
           cmake --build build --config Release
+
       - name: Pack artifacts
         run: |
           Copy-Item "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Redist\MSVC\14.44.35112\debug_nonredist\x64\Microsoft.VC143.OpenMP.LLVM\libomp140.x86_64.dll" .\build\bin\Release\
           7z a -snl llama-bin-win-rtx2060-cpu-x64.zip .\build\bin\Release\*
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v6
         with:
-          name: rtx2060-packages
+          name: rtx2060-cpu-packages
           path: "*.zip"
+
   windows-cuda-12_4-x64:
     runs-on: windows-2022
+
     steps:
       - name: Clone
         uses: actions/checkout@v6
+
       - name: ccache
         uses: ggml-org/ccache-action@v1
         with:
           key: rtx2060-cuda-12.4
           variant: ccache
+
       - name: Setup CUDA 12.4
         uses: ./.github/actions/windows-setup-cuda
         with:
           cuda_version: '12.4'
+
       - name: Install Ninja
         run: choco install ninja
+
       - name: Build CUDA backend
         shell: cmd
         run: |
@@ -92,52 +111,69 @@ jobs:
             -DGGML_CUDA_F16=ON ^
             -DLLAMA_BUILD_BORINGSSL=ON
           cmake --build build --config Release --target ggml-cuda
+
       - name: Pack ggml-cuda
         run: |
           7z a -snl llama-bin-win-rtx2060-cuda-12.4-x64.zip .\build\bin\Release\ggml-cuda.dll
+
       - name: Pack CUDA runtime DLLs
+        shell: cmd
         run: |
           mkdir cudart
           robocopy "${{ env.CUDA_PATH }}\bin" cudart cudart64_*.dll cublas64_*.dll cublasLt64_*.dll
           robocopy "${{ env.CUDA_PATH }}\lib" cudart cudart64_*.dll cublas64_*.dll cublasLt64_*.dll
-          7z a -snl cudart-llama-bin-win-rtx2060-cuda-12.4-x64.zip ./cudart/*
+          if %ERRORLEVEL% LSS 8 set ERRORLEVEL=0
+          7z a -snl cudart-llama-bin-win-rtx2060-cuda-12.4-x64.zip .\cudart\*
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v6
         with:
-          name: rtx2060-packages
+          name: rtx2060-cuda-packages
           path: "*.zip"
+
   release:
     if: ${{ ( github.event_name == 'push' && github.ref == 'refs/heads/master' ) || github.event.inputs.create_release == 'true' }}
+
     permissions:
       contents: write
+
     runs-on: ubuntu-latest
+
     needs:
       - windows-cpu-x64
       - windows-cuda-12_4-x64
+
     steps:
       - name: Clone
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
+
       - name: Determine tag name
         id: tag
         uses: ./.github/actions/get-tag-name
+
       - name: Download artifacts
         uses: actions/download-artifact@v7
         with:
-          name: rtx2060-packages
+          pattern: rtx2060-*-packages
           path: packages
+          merge-multiple: true
+
       - name: Merge CPU backend into CUDA package
         run: |
           cpu_zip="packages/llama-bin-win-rtx2060-cpu-x64.zip"
           cuda_zip="packages/llama-bin-win-rtx2060-cuda-12.4-x64.zip"
+
           # Extract CPU backend
           temp_dir=$(mktemp -d)
           unzip "$cpu_zip" -d "$temp_dir"
+
           # Add CPU files into CUDA zip
           realpath_cuda=$(realpath "$cuda_zip")
           (cd "$temp_dir" && zip -r "$realpath_cuda" .)
           rm -rf "$temp_dir"
+
           # Rename for release tag
           mkdir -p release
           mv "packages/llama-bin-win-rtx2060-cpu-x64.zip" \
@@ -146,20 +182,24 @@ jobs:
              "release/llama-${{ steps.tag.outputs.name }}-bin-win-rtx2060-cuda-12.4-x64.zip"
           mv "packages/cudart-llama-bin-win-rtx2060-cuda-12.4-x64.zip" \
              "release/cudart-llama-${{ steps.tag.outputs.name }}-bin-win-rtx2060-cuda-12.4-x64.zip"
+
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.tag.outputs.name }}-rtx2060
           name: "RTX 2060 Build ${{ steps.tag.outputs.name }}"
           body: |
-            Dedicated build for **CUDA 12.4 + RTX 2060 + i7-875H** on Windows 11 x64.
+            Dedicated build for **CUDA 12.4 + RTX 2060 + i7-875H (32GB RAM)** on Windows 11 x64.
+
             <details open>
             ${{ github.event.head_commit.message }}
             </details>
+
             **Build parameters:**
             - CUDA 12.4, architecture `sm_75` (Turing)
             - `GGML_CUDA_FMA=ON`, `GGML_CUDA_F16=ON`
             - BoringSSL enabled
+
             **Downloads:**
             - [Windows x64 CPU backend](https://github.com/${{ github.repository }}/releases/download/${{ steps.tag.outputs.name }}-rtx2060/llama-${{ steps.tag.outputs.name }}-bin-win-rtx2060-cpu-x64.zip)
             - [Windows x64 CUDA 12.4 (RTX 2060)](https://github.com/${{ github.repository }}/releases/download/${{ steps.tag.outputs.name }}-rtx2060/llama-${{ steps.tag.outputs.name }}-bin-win-rtx2060-cuda-12.4-x64.zip) — includes CPU backend
