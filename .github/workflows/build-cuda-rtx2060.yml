@@ -20,6 +20,9 @@ on:
     paths:
       - '.github/workflows/build-cuda-rtx2060.yml'
 
+permissions:
+  contents: read
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref && github.ref || github.run_id }}
   cancel-in-progress: true
