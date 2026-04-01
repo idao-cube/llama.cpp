@@ -1,0 +1,201 @@
+name: Build CUDA 12.4 RTX 2060 (Windows x64)
+
+# Custom build optimized for:
+#   GPU:  NVIDIA RTX 2060 (Turing, SM 7.5) with CUDA 12.4
+#   CPU:  Intel Core i7-875H (AVX2 / FMA / F16C)
+#   RAM:  32 GB
+#   OS:   Windows 11 x64
+
+on:
+  workflow_dispatch:
+    inputs:
+      create_release:
+        description: 'Create new release'
+        required: true
+        type: boolean
+        default: false
+  push:
+    branches:
+      - master
+    paths:
+      - '.github/workflows/build-cuda-rtx2060.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref && github.ref || github.run_id }}
+  cancel-in-progress: true
+
+env:
+  BRANCH_NAME: ${{ github.head_ref || github.ref_name }}
+  CMAKE_ARGS: "-DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_TOOLS=ON -DLLAMA_BUILD_SERVER=ON -DGGML_RPC=ON"
+
+jobs:
+  windows-cuda-rtx2060:
+    runs-on: windows-2022
+
+    steps:
+      - name: Clone
+        id: checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Install ccache
+        uses: ggml-org/ccache-action@v1.2.21
+        with:
+          key: windows-cuda-12.4-rtx2060
+          variant: ccache
+          evict-old-files: 1d
+
+      - name: Install CUDA Toolkit 12.4
+        uses: ./.github/actions/windows-setup-cuda
+        with:
+          cuda_version: '12.4'
+
+      - name: Install Ninja
+        id: install_ninja
+        run: |
+          choco install ninja
+
+      # ---- Build CUDA backend (ggml-cuda.dll) ----
+      - name: Build CUDA backend
+        id: cmake_build_cuda
+        shell: cmd
+        run: |
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvarsall.bat" x64
+          cmake -S . -B build-cuda -G "Ninja Multi-Config" ^
+            -DGGML_BACKEND_DL=ON ^
+            -DGGML_NATIVE=OFF ^
+            -DGGML_CPU=OFF ^
+            -DGGML_CUDA=ON ^
+            -DCMAKE_CUDA_ARCHITECTURES=75 ^
+            -DLLAMA_BUILD_BORINGSSL=ON ^
+            -DGGML_CUDA_CUB_3DOT2=ON
+          set /A NINJA_JOBS=%NUMBER_OF_PROCESSORS%-1
+          cmake --build build-cuda --config Release -j %NINJA_JOBS% --target ggml-cuda
+
+      # ---- Build main binary + CPU backend (AVX2 / FMA / F16C for i7-875H) ----
+      - name: Build main binary with CPU backend
+        id: cmake_build_main
+        shell: cmd
+        run: |
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvarsall.bat" x64
+          cmake -S . -B build -G "Ninja Multi-Config" ^
+            -DGGML_NATIVE=OFF ^
+            -DGGML_AVX=ON ^
+            -DGGML_AVX2=ON ^
+            -DGGML_FMA=ON ^
+            -DGGML_F16C=ON ^
+            -DGGML_BACKEND_DL=ON ^
+            -DGGML_CUDA=OFF ^
+            -DLLAMA_BUILD_BORINGSSL=ON ^
+            ${{ env.CMAKE_ARGS }}
+          set /A NINJA_JOBS=%NUMBER_OF_PROCESSORS%-1
+          cmake --build build --config Release -j %NINJA_JOBS%
+
+      - name: Determine tag name
+        id: tag
+        uses: ./.github/actions/get-tag-name
+
+      - name: Pack artifacts
+        id: pack_artifacts
+        run: |
+          # Copy CUDA backend DLL into the main build output
+          Copy-Item .\build-cuda\bin\Release\ggml-cuda.dll .\build\bin\Release\
+
+          # Copy CUDA runtime DLLs
+          $cudaSrc = @("${{ env.CUDA_PATH }}\bin", "${{ env.CUDA_PATH }}\lib", "${{ env.CUDA_PATH }}\bin\x64")
+          foreach ($dir in $cudaSrc) {
+            if (Test-Path $dir) {
+              Get-ChildItem -Path $dir -Filter "cudart64_*" -ErrorAction SilentlyContinue | Copy-Item -Destination .\build\bin\Release\ -Force
+              Get-ChildItem -Path $dir -Filter "cublas64_*"  -ErrorAction SilentlyContinue | Copy-Item -Destination .\build\bin\Release\ -Force
+              Get-ChildItem -Path $dir -Filter "cublasLt64_*" -ErrorAction SilentlyContinue | Copy-Item -Destination .\build\bin\Release\ -Force
+            }
+          }
+
+          # Copy license
+          Copy-Item LICENSE .\build\bin\Release\
+
+          # Create zip
+          7z a -snl llama-${{ steps.tag.outputs.name }}-bin-win-cuda-12.4-rtx2060-x64.zip .\build\bin\Release\*
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v6
+        with:
+          path: llama-${{ steps.tag.outputs.name }}-bin-win-cuda-12.4-rtx2060-x64.zip
+          name: llama-bin-win-cuda-12.4-rtx2060-x64.zip
+
+  release:
+    if: ${{ ( github.event_name == 'push' && github.ref == 'refs/heads/master' ) || github.event.inputs.create_release == 'true' }}
+
+    permissions:
+      contents: write
+
+    runs-on: ubuntu-latest
+
+    needs:
+      - windows-cuda-rtx2060
+
+    steps:
+      - name: Clone
+        id: checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Determine tag name
+        id: tag
+        uses: ./.github/actions/get-tag-name
+
+      - name: Download artifacts
+        id: download-artifact
+        uses: actions/download-artifact@v7
+        with:
+          path: ./artifact
+          merge-multiple: true
+
+      - name: Move artifacts
+        id: move_artifacts
+        run: |
+          mkdir -p release
+          mv -v artifact/*.zip release/
+
+      - name: Create release
+        id: create_release
+        uses: ggml-org/action-create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ steps.tag.outputs.name }}-rtx2060
+          body: |
+            Custom build for **CUDA 12.4 + RTX 2060 + i7-875H (AVX2) + 32 GB RAM** on Windows 11 x64.
+
+            **Build details:**
+            - CUDA 12.4 with SM 7.5 (RTX 2060 Turing)
+            - CPU backend with AVX2 / FMA / F16C (Intel Core i7-875H)
+            - Includes llama-server, llama-cli, and all tools
+            - CUDA runtime DLLs bundled
+
+            **Download:**
+            - [Windows x64 (CUDA 12.4, RTX 2060)](https://github.com/${{ github.repository }}/releases/download/${{ steps.tag.outputs.name }}-rtx2060/llama-${{ steps.tag.outputs.name }}-bin-win-cuda-12.4-rtx2060-x64.zip)
+
+      - name: Upload release
+        id: upload_release
+        uses: actions/github-script@v8
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const path = require('path');
+            const fs = require('fs');
+            const release_id = '${{ steps.create_release.outputs.id }}';
+            for (let file of await fs.readdirSync('./release')) {
+              if (path.extname(file) === '.zip') {
+                console.log('uploadReleaseAsset', file);
+                await github.rest.repos.uploadReleaseAsset({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  release_id: release_id,
+                  name: file,
+                  data: await fs.readFileSync(`./release/${file}`)
+                });
+              }
+            }
