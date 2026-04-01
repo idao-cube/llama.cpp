@@ -73,7 +73,7 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v6
         with:
-          name: rtx2060-packages
+          name: rtx2060-cpu-packages
           path: "*.zip"
 
   windows-cuda-12_4-x64:
@@ -128,7 +128,7 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v6
         with:
-          name: rtx2060-packages
+          name: rtx2060-cuda-packages
           path: "*.zip"
 
   release:
@@ -156,8 +156,9 @@ jobs:
       - name: Download artifacts
         uses: actions/download-artifact@v7
         with:
-          name: rtx2060-packages
+          pattern: rtx2060-*-packages
           path: packages
+          merge-multiple: true
 
       - name: Merge CPU backend into CUDA package
         run: |
