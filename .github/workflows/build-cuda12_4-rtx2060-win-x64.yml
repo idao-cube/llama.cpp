@@ -29,6 +29,9 @@ env:
   BRANCH_NAME: ${{ github.head_ref || github.ref_name }}
   CMAKE_ARGS: "-DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_TOOLS=ON -DLLAMA_BUILD_SERVER=ON -DGGML_RPC=ON"
 
+permissions:
+  contents: read
+
 jobs:
   windows-cpu-x64:
     runs-on: windows-2025
@@ -114,11 +117,13 @@ jobs:
           7z a -snl llama-bin-win-rtx2060-cuda-12.4-x64.zip .\build\bin\Release\ggml-cuda.dll
 
       - name: Pack CUDA runtime DLLs
+        shell: cmd
         run: |
           mkdir cudart
           robocopy "${{ env.CUDA_PATH }}\bin" cudart cudart64_*.dll cublas64_*.dll cublasLt64_*.dll
           robocopy "${{ env.CUDA_PATH }}\lib" cudart cudart64_*.dll cublas64_*.dll cublasLt64_*.dll
-          7z a -snl cudart-llama-bin-win-rtx2060-cuda-12.4-x64.zip ./cudart/*
+          if %ERRORLEVEL% LSS 8 set ERRORLEVEL=0
+          7z a -snl cudart-llama-bin-win-rtx2060-cuda-12.4-x64.zip .\cudart\*
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v6
@@ -183,7 +188,7 @@ jobs:
           tag_name: ${{ steps.tag.outputs.name }}-rtx2060
           name: "RTX 2060 Build ${{ steps.tag.outputs.name }}"
           body: |
-            Dedicated build for **CUDA 12.4 + RTX 2060 + i7-875H** on Windows 11 x64.
+            Dedicated build for **CUDA 12.4 + RTX 2060 + i7-875H (32GB RAM)** on Windows 11 x64.
 
             <details open>
             ${{ github.event.head_commit.message }}
